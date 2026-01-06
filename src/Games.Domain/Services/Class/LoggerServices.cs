@@ -43,4 +43,21 @@ public class LoggerServices(ILogger<LoggerServices> logger,
         await repository!.AddILogger(log);
         await repository.Commit();
     }
+
+    /// <summary>
+    /// Registra uma mensagem de aviso no sistema de logs e persiste no repositório de logs.
+    /// </summary>
+    /// <param name="message">Mensagem de aviso a ser registrada.</param>
+    /// <returns>Task assíncrona representando a operação de log.</returns>
+    public async Task LogWarning(string message) {
+        logger.LogWarning(message);
+
+        using var scope = serviceProvider.CreateScope();
+        var repository = scope.ServiceProvider.GetService(typeof(ILoggerRepository)) as ILoggerRepository;
+
+        var log = ILoggerEnt.Criar("Warning", message, 0);
+
+        await repository!.AddILogger(log);
+        await repository.Commit();
+    }
 }

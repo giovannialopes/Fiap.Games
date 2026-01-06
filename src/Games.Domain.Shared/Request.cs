@@ -12,8 +12,25 @@ public static class Request
             client.Encoding = Encoding.UTF8;
             if (headers != null) client.Headers.Add(headers);
 
-            var json = client.DownloadString(url);
-            return JsonConvert.DeserializeObject<T>(json);
+            try {
+                var json = client.DownloadString(url);
+                return JsonConvert.DeserializeObject<T>(json);
+            }
+            catch (WebException ex) {
+                if (ex.Response is HttpWebResponse httpResponse) {
+                    using (var stream = httpResponse.GetResponseStream())
+                    using (var reader = new StreamReader(stream ?? Stream.Null)) {
+                        var errorBody = reader.ReadToEnd();
+                        throw new Exception(
+                            $"Erro ao chamar {url}. Status: {httpResponse.StatusCode} ({httpResponse.StatusDescription}). Resposta: {errorBody}", 
+                            ex);
+                    }
+                }
+                throw new Exception($"Erro ao chamar {url}. {ex.Message}", ex);
+            }
+            catch (Exception ex) {
+                throw new Exception($"Erro inesperado ao chamar {url}. {ex.Message}", ex);
+            }
         }
     }
     public static T Post<T>(string url, object data) {

@@ -16,7 +16,8 @@ public class JogosServices(
     IJogosRepository jogosRepository,
     IPromocoesServices promocoesServices,
     ILoggerServices logger,
-    IWalletBusPublisher walletBusPublisher) : IJogosServices
+    IWalletBusPublisher walletBusPublisher,
+    IUserService userService) : IJogosServices
 {
     public async Task<Result<JogosDto.JogosDtoResponse>> AlterarJogos(string Nome, JogosDto.JogosDtoRequest request) {
         var jogo = await jogosRepository.ObterJogoPorNome(Nome);
@@ -69,50 +70,98 @@ public class JogosServices(
 
 
     public async Task<Result<JogosDto.JogosDtoResponseCompra>> ComprarJogos(JogosDto.JogosDtoComprarJogos request, string userId) {
+        
+        // Validação de entrada
+        if (string.IsNullOrWhiteSpace(request?.Nome))
+        {
+            await logger.LogError("Nome do jogo não informado na compra.");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Nome do jogo é obrigatório.", "400");
+        }
 
+        if (!Guid.TryParse(userId, out var perfilId))
+        {
+            await logger.LogError($"ID de usuário inválido: {userId}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>("ID de usuário inválido.", "400");
+        }
+
+        // Verificar se o jogo existe e está ativo
         var jogo = await jogosRepository.ObterJogoPorNome(request.Nome);
         if (jogo == null) {
-            await logger.LogError($"Jogo não encontrado.");
-            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Jogo não encontrado.", "500");
+            await logger.LogError($"Jogo não encontrado: {request.Nome}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Jogo não encontrado.", "404");
         }
 
+        if (!jogo.Ativo)
+        {
+            await logger.LogError($"Jogo inativo: {request.Nome}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Este jogo não está mais disponível para compra.", "400");
+        }
+
+        // Verificar se o usuário já possui o jogo
         var jaPossui = await jogosRepository.VerificaSeUsuarioPossuiJogo(jogo.Id.ToString(), userId);
         if (jaPossui != null) {
-            await logger.LogError($"Você ja possui esse jogo, não é possivel comprar novamente.");
-            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Você ja possui esse jogo, não é possivel comprar novamente.", "500");
+            await logger.LogWarning($"Usuário {userId} já possui o jogo {jogo.Nome}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Você já possui esse jogo, não é possível comprar novamente.", "400");
         }
 
+        // Calcular preço final considerando promoções
         var promoResult = await promocoesServices.ConsultaPromocoesAtivas();
         var precoFinal = jogo.Preco;
+        var descontoAplicado = 0m;
 
-        if (promoResult.IsSuccess) {
+        if (promoResult.IsSuccess && promoResult.Value != null) {
             var promocao = promoResult.Value;
 
-            if (promocao.IdJogos.Contains(jogo.Id)) {
+            if (promocao.IdJogos != null && promocao.IdJogos.Contains(jogo.Id)) {
                 precoFinal = promocao.Valor;
+                descontoAplicado = jogo.Preco - precoFinal;
+                await logger.LogInformation($"Promoção aplicada ao jogo {jogo.Nome}: Desconto de {descontoAplicado:C}");
             }
         }
 
-        var carteira = User.PegaSaldo(Guid.Parse(userId));
-
-        if (carteira == null || carteira.Saldo < precoFinal) {
-            await logger.LogError($"Saldo insuficiente.");
-            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Saldo insuficiente.", "500");
+        // Validar preço
+        if (precoFinal <= 0)
+        {
+            await logger.LogError($"Preço inválido para o jogo {jogo.Nome}: {precoFinal}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Preço do jogo inválido.", "400");
         }
 
-        await walletBusPublisher.Publish(new PaymentCreatedEvent(
-            JogoId : jogo.Id,
-            PerfilId: Guid.Parse(userId),
-            saldo: precoFinal
-        ), CancellationToken.None);
+        // Verificar saldo do usuário
+        var carteira = userService.PegaSaldo(perfilId);
+        if (carteira == null) {
+            await logger.LogError($"Carteira não encontrada para o usuário {userId}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>("Carteira não encontrada. Por favor, adicione saldo primeiro.", "400");
+        }
 
+        if (carteira.Saldo < precoFinal) {
+            await logger.LogWarning($"Saldo insuficiente para o usuário {userId}. Saldo: {carteira.Saldo:C}, Necessário: {precoFinal:C}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>(
+                $"Saldo insuficiente. Você possui {carteira.Saldo:C} e precisa de {precoFinal:C}.", "400");
+        }
 
-        await logger.LogInformation("Finalizou ComprarJogos");
-        return Result.Success(new JogosDto.JogosDtoResponseCompra {
-            PerfilId = Guid.Parse(userId),
-            JogoId = jogo.Id     
-        });
+        // Publicar evento de compra
+        try
+        {
+            await walletBusPublisher.Publish(new PaymentCreatedEvent(
+                JogoId: jogo.Id,
+                PerfilId: perfilId,
+                saldo: precoFinal
+            ), CancellationToken.None);
 
+            await logger.LogInformation(
+                $"Compra iniciada: Usuário {userId} - Jogo {jogo.Nome} - Preço {precoFinal:C}");
+
+            return Result.Success(new JogosDto.JogosDtoResponseCompra {
+                PerfilId = perfilId,
+                JogoId = jogo.Id     
+            });
+        }
+        catch (Exception ex)
+        {
+            await logger.LogError($"Erro ao publicar evento de compra: {ex.Message}");
+            return Result.Failure<JogosDto.JogosDtoResponseCompra>(
+                "Erro ao processar a compra. Tente novamente mais tarde.", "500");
+        }
     }
 
     public async Task<Result<List<JogosDto.JogosDtoResponse>>> ConsultarJogos() {

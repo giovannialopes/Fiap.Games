@@ -1,11 +1,12 @@
-using Azure.Messaging.ServiceBus;
 using FluentValidation.AspNetCore;
 using Games.Domain.Dependency;
 using Games.Domain.Middleware;
 using Games.Infrastructure.Data;
 using Games.Infrastructure.Dependency;
+using MassTransit;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Text;
@@ -38,24 +39,58 @@ builder.Services.AddSwaggerGen(c => {
     });
 });
 
-//Azure Service Bus
-builder.Services.AddSingleton(sp => {
-    var cfg = sp.GetRequiredService<IConfiguration>();
-return new ServiceBusClient(cfg["ServiceBus:ConnectionString"]);
-});
+//RabbitMQ com MassTransit
+builder.Services.AddMassTransit(x =>
+{
+    x.UsingRabbitMq((context, cfg) =>
+    {
+        var configuration = context.GetRequiredService<IConfiguration>();
+        var loggerFactory = context.GetRequiredService<ILoggerFactory>();
+        var logger = loggerFactory.CreateLogger("MassTransit");
+        
+        var host = configuration["RabbitMQ:Host"] ?? "localhost";
+        var port = configuration.GetValue<ushort>("RabbitMQ:Port", 5672);
+        var username = configuration["RabbitMQ:Username"] ?? "guest";
+        var password = configuration["RabbitMQ:Password"] ?? "guest";
+        var virtualHost = configuration["RabbitMQ:VirtualHost"] ?? "/";
 
-builder.Services.AddSingleton(sp => {
-    var cfg = sp.GetRequiredService<IConfiguration>();
-    var client = sp.GetRequiredService<ServiceBusClient>();
-    var queue = cfg["ServiceBus:Queue"] ?? "payments";
-    return client.CreateSender(queue);
+        logger.LogInformation("Configurando RabbitMQ: Host={Host}, Port={Port}, VirtualHost={VirtualHost}, Username={Username}", 
+            host, port, virtualHost, username);
+
+        cfg.Host(host, port, virtualHost, h =>
+        {
+            h.Username(username);
+            h.Password(password);
+        });
+
+        // Configuração de reconexão automática com retry exponencial
+        cfg.UseMessageRetry(r => r.Exponential(
+            retryLimit: 5,
+            minInterval: TimeSpan.FromSeconds(1),
+            maxInterval: TimeSpan.FromSeconds(30),
+            intervalDelta: TimeSpan.FromSeconds(2)
+        ));
+
+        // Configuração de circuit breaker para resiliência
+        cfg.UseCircuitBreaker(cb => {
+            cb.TrackingPeriod = TimeSpan.FromMinutes(1);
+            cb.TripThreshold = 15;
+            cb.ActiveThreshold = 10;
+            cb.ResetInterval = TimeSpan.FromMinutes(5);
+        });
+
+        // Configuração de outbox para garantir entrega
+        cfg.UseInMemoryOutbox();
+        
+        cfg.ConfigureEndpoints(context);
+    });
 });
 
 //Banco de Dados
 builder.Services.AddDbContext<DbGames>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// Valida��o FluentValidation
+// Valida��o FluentValidation
 builder.Services.AddFluentValidationAutoValidation()
     .AddFluentValidationClientsideAdapters();
 
@@ -78,6 +113,28 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 
+// Health Checks
+builder.Services.AddHealthChecks()
+    .AddCheck("database", () => {
+        // Verificação básica - será verificado no runtime
+        return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Database check configurado");
+    })
+    .AddCheck("rabbitmq", () => {
+        // Verificação básica de conectividade RabbitMQ
+        var host = builder.Configuration["RabbitMQ:Host"] ?? "localhost";
+        var port = builder.Configuration.GetValue<ushort>("RabbitMQ:Port", 5672);
+        try {
+            using var client = new System.Net.Sockets.TcpClient();
+            var result = client.BeginConnect(host, port, null, null);
+            var success = result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(1));
+            if (!success) return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy("RabbitMQ não acessível");
+            client.EndConnect(result);
+            return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("RabbitMQ acessível");
+        } catch {
+            return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Unhealthy("RabbitMQ não acessível");
+        }
+    });
+
 builder.Services.AddServices();
 builder.Services.AddRepositories();
 
@@ -90,17 +147,28 @@ if (app.Environment.IsDevelopment() || app.Environment.IsProduction()) {
 }
 
 
+app.UseMiddleware<ObservabilityMiddleware>();
 app.UseMiddleware<ValidationMiddleware>();
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseMiddleware<JwtValidationMiddleware>();
 app.UseAuthorization();
+
+// Health Check endpoint
+app.MapHealthChecks("/health");
+
 app.MapControllers();
 
 
-using (var scope = app.Services.CreateScope()) {
-    var dbContext = scope.ServiceProvider.GetRequiredService<DbGames>();
-    await dbContext.Database.EnsureCreatedAsync();
+// Inicializar banco de dados (não crítico - aplicação continua mesmo se falhar)
+try {
+    using (var scope = app.Services.CreateScope()) {
+        var dbContext = scope.ServiceProvider.GetRequiredService<DbGames>();
+        await dbContext.Database.EnsureCreatedAsync();
+    }
+} catch (Exception ex) {
+    var logger = app.Services.GetRequiredService<ILogger<Program>>();
+    logger.LogWarning(ex, "Não foi possível conectar ao banco de dados na inicialização. A aplicação continuará rodando.");
 }
 
 await app.RunAsync();

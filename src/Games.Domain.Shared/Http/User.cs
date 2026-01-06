@@ -1,12 +1,14 @@
 ﻿using Games.Domain.Shared.DTO;
 using System.Net;
-using System.Reflection;
 
 namespace Games.Domain.Shared.Http;
 
+/// <summary>
+/// Classe estática obsoleta. Use IUserService através de injeção de dependência.
+/// </summary>
 public static class User
 {
-    private const string _HOST = "https://users-api-fiap-f5eraydvfqatejb8.brazilsouth-01.azurewebsites.net/api/v1";
+    private const string _HOST = "https://localhost:7205/api/v1";
 
     public static CarteiraDto.CarteiraDtoResponse PegaSaldo(Guid perfilId) {
         Console.WriteLine($"[DEBUG] Chamando endpoint: {_HOST}/consulta/saldos | perfilId:{perfilId}");
