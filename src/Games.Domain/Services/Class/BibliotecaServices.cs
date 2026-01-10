@@ -17,10 +17,18 @@ public class BibliotecaServices(
 {
     public async Task<Result<LibraryDto.LibraryDtoResponse>> AdicionarJogoBiblioteca(LibraryDto.LibraryDtoRequest request) {
 
-        var jaPossui = await bibliotecaRepository.ValidaSeJaPossuiJogo(request.JogoId);
+        var jaPossui = await bibliotecaRepository.ValidaSeJaPossuiJogo(request.JogoId, request.PerfilId);
         if (jaPossui != null) {
-            await logger.LogError($"O usuario {request.PerfilId} ja possui o Jogo.");
-            return Result.Failure<LibraryDto.LibraryDtoResponse>("O Usuario já possui esse jogo.", "404");
+            // Idempotente: se já possui, retorna sucesso com os dados do jogo
+            var jogoExistente = await jogosRepository.ObterJogoPorId(request.JogoId);
+            await logger.LogInformation($"Usuário {request.PerfilId} já possuía o jogo {request.JogoId}. Operação idempotente.");
+            var responseExistente = new LibraryDto.LibraryDtoResponse {
+                Nome = jogoExistente.Nome,
+                Descricao = jogoExistente.Descricao,
+                Preco = jogoExistente.Preco,
+                Tipo = jogoExistente.Tipo,
+            };
+            return Result.Success(responseExistente);
         }
 
         var bibliotecaEnt = LibraryEnt.Criar(request.JogoId, request.PerfilId);

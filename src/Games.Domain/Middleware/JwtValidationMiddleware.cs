@@ -17,6 +17,7 @@ public class JwtValidationMiddleware
     public async Task InvokeAsync(HttpContext context) {
         if (context.Request.Path.StartsWithSegments("/swagger") ||
         context.Request.Path.StartsWithSegments("/health") || 
+        context.Request.Path.StartsWithSegments("/api/v1/metrics") ||
         context.Request.Path.StartsWithSegments("/api/v1/adicionar/jogo/biblioteca")) {
             await _next(context);
             return;

@@ -19,8 +19,10 @@ public class BibliotecaRepository : IBibliotecaRepository
         await Commit();
     }
 
-    public async Task<LibraryEnt> ValidaSeJaPossuiJogo(Guid jogoId) =>
-         await _dbGames.BIBLIOTECA_JOGOS.AsNoTracking().FirstOrDefaultAsync(x => x.JogoId.Equals(jogoId));
+    public async Task<LibraryEnt> ValidaSeJaPossuiJogo(Guid jogoId, Guid perfilId) =>
+         await _dbGames.BIBLIOTECA_JOGOS
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.JogoId.Equals(jogoId) && x.PerfilId.Equals(perfilId));
 
     public Task Commit() => _dbGames.SaveChangesAsync();
 

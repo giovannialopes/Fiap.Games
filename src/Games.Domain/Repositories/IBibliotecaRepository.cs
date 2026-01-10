@@ -6,5 +6,5 @@ public interface IBibliotecaRepository : ICommit
 {
     Task AdicionaNaBiblioteca(LibraryEnt library);
 
-    Task<LibraryEnt> ValidaSeJaPossuiJogo(Guid JogoId);
+    Task<LibraryEnt> ValidaSeJaPossuiJogo(Guid JogoId, Guid PerfilId);
 }
